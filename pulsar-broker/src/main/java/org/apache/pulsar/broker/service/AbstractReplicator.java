@@ -70,6 +70,8 @@ public abstract class AbstractReplicator {
         Stopped, Starting, Started, Stopping
     }
 
+    private volatile boolean isClosed = false;
+
     public AbstractReplicator(String localCluster, Topic localTopic, String remoteCluster, String remoteTopicName,
                               String replicatorPrefix, BrokerService brokerService, PulsarClientImpl replicationClient)
             throws PulsarServerException {
@@ -116,6 +118,13 @@ public abstract class AbstractReplicator {
     // This method needs to be synchronized with disconnects else if there is a disconnect followed by startProducer
     // the end result can be disconnect.
     public synchronized void startProducer() {
+        // This method comes from some actives call and may be call again after disconnect
+        // so here we will first mark isClosed is false
+        isClosed = false;
+        startProducerInternal();
+    }
+
+    public synchronized void startProducerInternal() {
         if (STATE_UPDATER.get(this) == State.Stopping) {
             long waitTimeMs = backOff.next();
             if (log.isDebugEnabled()) {
@@ -164,9 +173,14 @@ public abstract class AbstractReplicator {
     }
 
     protected void checkTopicActiveAndRetryStartProducer() {
+        // if replicator is closed do not retry start producer
+        if (isClosed) {
+            log.info("[{}] Do not retry start replicator because of replicator is already closed.", replicatorId);
+            return;
+        }
         isLocalTopicActive().thenAccept(isTopicActive -> {
             if (isTopicActive) {
-                startProducer();
+                startProducerInternal();
             }
         }).exceptionally(ex -> {
             log.warn("[{}] Stop retry to create producer due to topic load fail. Replicator state: {}", replicatorId,
@@ -226,6 +240,8 @@ public abstract class AbstractReplicator {
             }
             return disconnectFuture;
         }
+
+        isClosed = true;
 
         if (STATE_UPDATER.get(this) == State.Stopping) {
             // Do nothing since the all "STATE_UPDATER.set(this, Stopping)" instructions are followed by
