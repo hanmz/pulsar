@@ -135,6 +135,8 @@ class OpReadEntry implements ReadEntriesCallback {
             updateReadPosition(nexReadPosition);
             if (lostLedger != null) {
                 cursor.getManagedLedger().skipNonRecoverableLedger(lostLedger);
+            } else {
+                cursor.skipNonRecoverableEntries(readPosition, nexReadPosition);
             }
             checkReadCompletion();
         } else {
@@ -209,8 +211,8 @@ class OpReadEntry implements ReadEntriesCallback {
         entries = null;
         nextReadPosition = null;
         maxPosition = null;
-        recyclerHandle.recycle(this);
         skipCondition = null;
+        recyclerHandle.recycle(this);
     }
 
     private static final Logger log = LoggerFactory.getLogger(OpReadEntry.class);
