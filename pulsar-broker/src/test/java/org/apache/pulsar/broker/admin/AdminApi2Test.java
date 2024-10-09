@@ -114,9 +114,7 @@ import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.*;
 import org.apache.pulsar.common.policies.data.impl.BacklogQuotaImpl;
 import org.apache.pulsar.common.protocol.schema.SchemaData;
-import org.apache.pulsar.common.util.collections.ConcurrentOpenHashMap;
 import org.awaitility.Awaitility;
-import org.awaitility.reflect.WhiteboxImpl;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
@@ -2913,8 +2911,7 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
     }
 
     private AtomicInteger injectSchemaCheckCounterForTopic(String topicName) {
-        ConcurrentOpenHashMap<String, CompletableFuture<Optional<Topic>>> topics =
-                WhiteboxImpl.getInternalState(pulsar.getBrokerService(), "topics");
+        final var topics = pulsar.getBrokerService().getTopics();
         AbstractTopic topic = (AbstractTopic) topics.get(topicName).join().get();
         AbstractTopic spyTopic = Mockito.spy(topic);
         AtomicInteger counter = new AtomicInteger();
@@ -3488,7 +3485,7 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
         parameters1.put("usage_threshold", "100");
         List<String> nsRegexList = new ArrayList<>(namespaces);
 
-        return NamespaceIsolationData.builder()
+        NamespaceIsolationData.Builder build = NamespaceIsolationData.builder()
                 // "prop-ig/ns1" is present in test cluster, policy set on test2 should work
                 .namespaces(nsRegexList)
                 .primary(primaryBrokers)
@@ -3496,9 +3493,11 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
                 .autoFailoverPolicy(AutoFailoverPolicyData.builder()
                         .policyType(AutoFailoverPolicyType.min_available)
                         .parameters(parameters1)
-                        .build())
-                .unloadScope(scope)
-                .build();
+                        .build());
+        if (scope != null) {
+            build.unloadScope(scope);
+        }
+        return build.build();
     }
 
     private boolean allTopicsUnloaded(List<String> topics) {
@@ -3624,18 +3623,42 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
         testIsolationPolicyUnloadsNSWithScope(
                 topicType, "policy-all", nsPrefix, List.of("a1", "a2", "b1", "b2", "c1"),
                 all_matching, List.of(".*-unload-test-a.*"), List.of("b1", "b2", "c1"),
-                all_matching, List.of(".*-unload-test-a.*", ".*-unload-test-c.*"), List.of("b1", "b2"),
+                all_matching, List.of(".*-unload-test-c.*"), List.of("b1", "b2"),
                 Collections.singletonList(".*")
         );
     }
 
     @Test(dataProvider = "topicType")
-    public void testIsolationPolicyUnloadsNSWithChangedScope(final String topicType) throws Exception {
+    public void testIsolationPolicyUnloadsNSWithChangedScope1(final String topicType) throws Exception {
+        String nsPrefix1 = newUniqueName(defaultTenant + "/") + "-unload-test-";
+        // Addition case
+        testIsolationPolicyUnloadsNSWithScope(
+                topicType, "policy-changed1", nsPrefix1, List.of("a1", "a2", "b1", "b2", "c1"),
+                all_matching, List.of(".*-unload-test-a.*"), List.of("b1", "b2", "c1"),
+                changed, List.of(".*-unload-test-a.*", ".*-unload-test-c.*"), List.of("a1", "a2", "b1", "b2"),
+                Collections.singletonList(".*")
+        );
+    }
+
+    @Test(dataProvider = "topicType")
+    public void testIsolationPolicyUnloadsNSWithChangedScope2(final String topicType) throws Exception {
+        String nsPrefix2 = newUniqueName(defaultTenant + "/") + "-unload-test-";
+        // removal case
+        testIsolationPolicyUnloadsNSWithScope(
+                topicType, "policy-changed2", nsPrefix2, List.of("a1", "a2", "b1", "b2", "c1"),
+                all_matching, List.of(".*-unload-test-a.*", ".*-unload-test-c.*"), List.of("b1", "b2"),
+                changed, List.of(".*-unload-test-c.*"), List.of("b1", "b2", "c1"),
+                Collections.singletonList(".*")
+        );
+    }
+
+    @Test(dataProvider = "topicType")
+    public void testIsolationPolicyUnloadsNSWithScopeMissing(final String topicType) throws Exception {
         String nsPrefix = newUniqueName(defaultTenant + "/") + "-unload-test-";
         testIsolationPolicyUnloadsNSWithScope(
                 topicType, "policy-changed", nsPrefix, List.of("a1", "a2", "b1", "b2", "c1"),
                 all_matching, List.of(".*-unload-test-a.*"), List.of("b1", "b2", "c1"),
-                changed, List.of(".*-unload-test-a.*", ".*-unload-test-c.*"), List.of("a1", "a2", "b1", "b2"),
+                null, List.of(".*-unload-test-a.*", ".*-unload-test-c.*"), List.of("a1", "a2", "b1", "b2"),
                 Collections.singletonList(".*")
         );
     }

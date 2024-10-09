@@ -82,11 +82,9 @@ flexible messaging model and an intuitive client API.</description>
     <pulsar.broker.compiler.release>${maven.compiler.target}</pulsar.broker.compiler.release>
     <pulsar.client.compiler.release>8</pulsar.client.compiler.release>
 
-    <pulsar.client.python.version>3.4.0</pulsar.client.python.version>
+    <pulsar.client.python.version>3.5.0</pulsar.client.python.version>
 
-    <UBUNTU_MIRROR>http://archive.ubuntu.com/ubuntu/</UBUNTU_MIRROR>
-    <UBUNTU_SECURITY_MIRROR>http://security.ubuntu.com/ubuntu/</UBUNTU_SECURITY_MIRROR>
-    <IMAGE_JDK_MAJOR_VERSION>17</IMAGE_JDK_MAJOR_VERSION>
+    <IMAGE_JDK_MAJOR_VERSION>21</IMAGE_JDK_MAJOR_VERSION>
 
     <!--config keys to configure test selection -->
     <include>**/Test*.java,**/*Test.java,**/*Tests.java,**/*TestCase.java</include>
@@ -150,12 +148,12 @@ flexible messaging model and an intuitive client API.</description>
     <curator.version>5.1.0</curator.version>
     <netty.version>4.1.113.Final</netty.version>
     <netty-iouring.version>0.0.24.Final</netty-iouring.version>
-    <jetty.version>9.4.54.v20240208</jetty.version>
+    <jetty.version>9.4.56.v20240826</jetty.version>
     <conscrypt.version>2.5.2</conscrypt.version>
     <jersey.version>2.42</jersey.version>
     <athenz.version>1.10.50</athenz.version>
     <prometheus.version>0.16.0</prometheus.version>
-    <vertx.version>4.5.8</vertx.version>
+    <vertx.version>4.5.10</vertx.version>
     <rocksdb.version>7.9.2</rocksdb.version>
     <slf4j.version>2.0.13</slf4j.version>
     <commons.collections4.version>4.4</commons.collections4.version>
@@ -164,6 +162,7 @@ flexible messaging model and an intuitive client API.</description>
     <bouncycastle.bcpkix-fips.version>1.0.7</bouncycastle.bcpkix-fips.version>
     <bouncycastle.bc-fips.version>1.0.2.5</bouncycastle.bc-fips.version>
     <jackson.version>2.17.2</jackson.version>
+    <fastutil.version>8.5.14</fastutil.version>
     <reflections.version>0.10.2</reflections.version>
     <swagger.version>1.6.2</swagger.version>
     <puppycrawl.checkstyle.version>10.14.2</puppycrawl.checkstyle.version>
@@ -172,9 +171,9 @@ flexible messaging model and an intuitive client API.</description>
     <typetools.version>0.5.0</typetools.version>
     <byte-buddy.version>1.14.12</byte-buddy.version>
     <zt-zip.version>1.17</zt-zip.version>
-    <protobuf3.version>3.22.3</protobuf3.version>
+    <protobuf3.version>3.25.5</protobuf3.version>
     <protoc3.version>${protobuf3.version}</protoc3.version>
-    <grpc.version>1.56.0</grpc.version>
+    <grpc.version>1.56.1</grpc.version>
     <google-http-client.version>1.41.0</google-http-client.version>
     <perfmark.version>0.26.0</perfmark.version>
     <protoc-gen-grpc-java.version>${grpc.version}</protoc-gen-grpc-java.version>
@@ -187,7 +186,7 @@ flexible messaging model and an intuitive client API.</description>
     <kafka-client.version>3.4.0</kafka-client.version>
     <rabbitmq-client.version>5.18.0</rabbitmq-client.version>
     <aws-sdk.version>1.12.638</aws-sdk.version>
-    <avro.version>1.11.3</avro.version>
+    <avro.version>1.11.4</avro.version>
     <joda.version>2.10.10</joda.version>
     <jclouds.version>2.6.0</jclouds.version>
     <guice.version>5.1.0</guice.version>
@@ -199,7 +198,7 @@ flexible messaging model and an intuitive client API.</description>
     <openmldb-jdbc.version>0.4.4-hotfix1</openmldb-jdbc.version>
     <hdfs-offload-version3>3.3.5</hdfs-offload-version3>
     <json-smart.version>2.4.10</json-smart.version>
-    <opensearch.version>1.2.4</opensearch.version>
+    <opensearch.version>2.16.0</opensearch.version>
     <elasticsearch-java.version>8.12.1</elasticsearch-java.version>
     <debezium.version>1.9.7.Final</debezium.version>
     <debezium.postgresql.version>42.5.5</debezium.postgresql.version>
@@ -219,7 +218,7 @@ flexible messaging model and an intuitive client API.</description>
     <asynchttpclient.version>2.12.1</asynchttpclient.version>
     <commons-lang3.version>3.11</commons-lang3.version>
     <commons-configuration.version>1.10</commons-configuration.version>
-    <commons-io.version>2.8.0</commons-io.version>
+    <commons-io.version>2.14.0</commons-io.version>
     <commons-codec.version>1.15</commons-codec.version>
     <javax.ws.rs-api.version>2.1</javax.ws.rs-api.version>
     <hdrHistogram.version>2.1.9</hdrHistogram.version>
@@ -252,7 +251,7 @@ flexible messaging model and an intuitive client API.</description>
     <apache-http-client.version>4.5.13</apache-http-client.version>
     <apache-httpcomponents.version>4.4.15</apache-httpcomponents.version>
     <jetcd.version>0.7.7</jetcd.version>
-    <oxia.version>0.3.2</oxia.version>
+    <oxia.version>0.4.5</oxia.version>
     <snakeyaml.version>2.0</snakeyaml.version>
     <ant.version>1.10.12</ant.version>
     <seancfoley.ipaddress.version>5.5.0</seancfoley.ipaddress.version>
@@ -911,6 +910,12 @@ flexible messaging model and an intuitive client API.</description>
         <version>${jackson.version}</version>
         <type>pom</type>
         <scope>import</scope>
+      </dependency>
+
+      <dependency>
+        <groupId>it.unimi.dsi</groupId>
+        <artifactId>fastutil</artifactId>
+        <version>${fastutil.version}</version>
       </dependency>
 
       <dependency>
@@ -2748,30 +2753,6 @@ flexible messaging model and an intuitive client API.</description>
       </properties>
     </profile>
 
-    <profile>
-      <id>ubuntu-mirror-set</id>
-      <activation>
-        <property>
-          <name>env.UBUNTU_MIRROR</name>
-        </property>
-      </activation>
-      <properties>
-        <!-- Override the default value with the environment variable -->
-        <UBUNTU_MIRROR>${env.UBUNTU_MIRROR}</UBUNTU_MIRROR>
-      </properties>
-    </profile>
-    <profile>
-      <id>ubuntu-security-mirror-set</id>
-      <activation>
-        <property>
-          <name>env.UBUNTU_SECURITY_MIRROR</name>
-        </property>
-      </activation>
-      <properties>
-        <!-- Override the default value with the environment variable -->
-        <UBUNTU_SECURITY_MIRROR>${env.UBUNTU_SECURITY_MIRROR}</UBUNTU_SECURITY_MIRROR>
-      </properties>
-    </profile>
     <profile>
       <id>jdk-major-version-set</id>
       <activation>

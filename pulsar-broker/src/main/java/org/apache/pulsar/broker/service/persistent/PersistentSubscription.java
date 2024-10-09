@@ -23,6 +23,7 @@ import static org.apache.pulsar.common.naming.SystemTopicNames.isEventSystemTopi
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
 import io.netty.buffer.ByteBuf;
+import java.io.IOException;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -51,8 +52,6 @@ import org.apache.bookkeeper.mledger.ManagedLedgerException.ConcurrentFindCursor
 import org.apache.bookkeeper.mledger.ManagedLedgerException.InvalidCursorPositionException;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.ScanOutcome;
-import org.apache.bookkeeper.mledger.impl.ManagedCursorImpl;
-import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
 import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.lang3.tuple.MutablePair;
 import org.apache.pulsar.broker.ServiceConfiguration;
@@ -71,6 +70,7 @@ import org.apache.pulsar.broker.service.Consumer;
 import org.apache.pulsar.broker.service.Dispatcher;
 import org.apache.pulsar.broker.service.EntryFilterSupport;
 import org.apache.pulsar.broker.service.GetStatsOptions;
+import org.apache.pulsar.broker.service.StickyKeyDispatcher;
 import org.apache.pulsar.broker.service.Subscription;
 import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.broker.service.plugin.EntryFilter;
@@ -252,7 +252,12 @@ public class PersistentSubscription extends AbstractSubscription {
                         case Shared:
                             if (dispatcher == null || dispatcher.getType() != SubType.Shared) {
                                 previousDispatcher = dispatcher;
-                                dispatcher = new PersistentDispatcherMultipleConsumers(topic, cursor, this);
+                                ServiceConfiguration config = topic.getBrokerService().getPulsar().getConfig();
+                                if (config.isSubscriptionSharedUseClassicPersistentImplementation()) {
+                                    dispatcher = new PersistentDispatcherMultipleConsumersClassic(topic, cursor, this);
+                                } else {
+                                    dispatcher = new PersistentDispatcherMultipleConsumers(topic, cursor, this);
+                                }
                             }
                             break;
                         case Failover:
@@ -273,11 +278,19 @@ public class PersistentSubscription extends AbstractSubscription {
                         case Key_Shared:
                             KeySharedMeta ksm = consumer.getKeySharedMeta();
                             if (dispatcher == null || dispatcher.getType() != SubType.Key_Shared
-                                    || !((PersistentStickyKeyDispatcherMultipleConsumers) dispatcher)
+                                    || !((StickyKeyDispatcher) dispatcher)
                                     .hasSameKeySharedPolicy(ksm)) {
                                 previousDispatcher = dispatcher;
-                                dispatcher = new PersistentStickyKeyDispatcherMultipleConsumers(topic, cursor, this,
-                                        topic.getBrokerService().getPulsar().getConfiguration(), ksm);
+                                ServiceConfiguration config = topic.getBrokerService().getPulsar().getConfig();
+                                if (config.isSubscriptionKeySharedUseClassicPersistentImplementation()) {
+                                    dispatcher =
+                                            new PersistentStickyKeyDispatcherMultipleConsumersClassic(topic, cursor,
+                                                    this,
+                                                    topic.getBrokerService().getPulsar().getConfiguration(), ksm);
+                                } else {
+                                    dispatcher = new PersistentStickyKeyDispatcherMultipleConsumers(topic, cursor, this,
+                                            topic.getBrokerService().getPulsar().getConfiguration(), ksm);
+                                }
                             }
                             break;
                         default:
@@ -405,7 +418,7 @@ public class PersistentSubscription extends AbstractSubscription {
             cursor.asyncDelete(positions, deleteCallback, previousMarkDeletePosition);
             if (topic.getBrokerService().getPulsar().getConfig().isTransactionCoordinatorEnabled()) {
                 positions.forEach(position -> {
-                    if (((ManagedCursorImpl) cursor).isMessageDeleted(position)) {
+                    if ((cursor.isMessageDeleted(position))) {
                         pendingAckHandle.clearIndividualPosition(position);
                     }
                 });
@@ -552,7 +565,7 @@ public class PersistentSubscription extends AbstractSubscription {
         final String newNonDurableCursorName = "analyze-backlog-" + UUID.randomUUID();
         ManagedCursor newNonDurableCursor;
         try {
-            newNonDurableCursor = ((ManagedCursorImpl) cursor).duplicateNonDurableCursor(newNonDurableCursorName);
+            newNonDurableCursor = cursor.duplicateNonDurableCursor(newNonDurableCursorName);
         } catch (ManagedLedgerException e) {
             return CompletableFuture.failedFuture(e);
         }
@@ -1223,7 +1236,7 @@ public class PersistentSubscription extends AbstractSubscription {
         Dispatcher dispatcher = this.dispatcher;
         if (dispatcher != null) {
             Map<Consumer, List<Range>> consumerKeyHashRanges = getType() == SubType.Key_Shared
-                    ? ((PersistentStickyKeyDispatcherMultipleConsumers) dispatcher).getConsumerKeyHashRanges() : null;
+                    ? ((StickyKeyDispatcher) dispatcher).getConsumerKeyHashRanges() : null;
             dispatcher.getConsumers().forEach(consumer -> {
                 ConsumerStatsImpl consumerStats = consumer.getStats();
                 if (!getStatsOptions.isExcludeConsumers()) {
@@ -1262,17 +1275,18 @@ public class PersistentSubscription extends AbstractSubscription {
             }
         }
 
-        if (dispatcher instanceof PersistentDispatcherMultipleConsumers) {
+        if (dispatcher instanceof AbstractPersistentDispatcherMultipleConsumers) {
             subStats.delayedMessageIndexSizeInBytes =
-                    ((PersistentDispatcherMultipleConsumers) dispatcher).getDelayedTrackerMemoryUsage();
+                    ((AbstractPersistentDispatcherMultipleConsumers) dispatcher).getDelayedTrackerMemoryUsage();
 
             subStats.bucketDelayedIndexStats =
-                    ((PersistentDispatcherMultipleConsumers) dispatcher).getBucketDelayedIndexStats();
+                    ((AbstractPersistentDispatcherMultipleConsumers) dispatcher).getBucketDelayedIndexStats();
         }
 
         if (Subscription.isIndividualAckMode(subType)) {
-            if (dispatcher instanceof PersistentDispatcherMultipleConsumers) {
-                PersistentDispatcherMultipleConsumers d = (PersistentDispatcherMultipleConsumers) dispatcher;
+            if (dispatcher instanceof AbstractPersistentDispatcherMultipleConsumers) {
+                AbstractPersistentDispatcherMultipleConsumers d =
+                        (AbstractPersistentDispatcherMultipleConsumers) dispatcher;
                 subStats.unackedMessages = d.getTotalUnackedMessages();
                 subStats.blockedSubscriptionOnUnackedMsgs = d.isBlockedDispatcherOnUnackedMsgs();
                 subStats.msgDelayed = d.getNumberOfDelayedMessages();
@@ -1281,7 +1295,7 @@ public class PersistentSubscription extends AbstractSubscription {
         }
         subStats.msgBacklog = getNumberOfEntriesInBacklog(getStatsOptions.isGetPreciseBacklog());
         if (getStatsOptions.isSubscriptionBacklogSize()) {
-            subStats.backlogSize = ((ManagedLedgerImpl) topic.getManagedLedger())
+            subStats.backlogSize = topic.getManagedLedger()
                     .getEstimatedBacklogSize(cursor.getMarkDeletedPosition());
         } else {
             subStats.backlogSize = -1;
@@ -1292,10 +1306,8 @@ public class PersistentSubscription extends AbstractSubscription {
         subStats.isReplicated = isReplicated();
         subStats.subscriptionProperties = subscriptionProperties;
         subStats.isDurable = cursor.isDurable();
-        if (getType() == SubType.Key_Shared && dispatcher instanceof PersistentStickyKeyDispatcherMultipleConsumers) {
-            PersistentStickyKeyDispatcherMultipleConsumers keySharedDispatcher =
-                    (PersistentStickyKeyDispatcherMultipleConsumers) dispatcher;
-
+        if (getType() == SubType.Key_Shared && dispatcher instanceof StickyKeyDispatcher) {
+            StickyKeyDispatcher keySharedDispatcher = (StickyKeyDispatcher) dispatcher;
             subStats.allowOutOfOrderDelivery = keySharedDispatcher.isAllowOutOfOrderDelivery();
             subStats.keySharedMode = keySharedDispatcher.getKeySharedMode().toString();
 
@@ -1303,25 +1315,8 @@ public class PersistentSubscription extends AbstractSubscription {
                     .getRecentlyJoinedConsumers();
             if (recentlyJoinedConsumers != null && recentlyJoinedConsumers.size() > 0) {
                 recentlyJoinedConsumers.forEach((k, v) -> {
-                    // The dispatcher allows same name consumers
-                    final StringBuilder stringBuilder = new StringBuilder();
-                    stringBuilder.append("consumerName=").append(k.consumerName())
-                            .append(", consumerId=").append(k.consumerId());
-                    if (k.cnx() != null) {
-                        stringBuilder.append(", address=").append(k.cnx().clientAddress());
-                    }
-                    subStats.consumersAfterMarkDeletePosition.put(stringBuilder.toString(), v.toString());
+                    subStats.consumersAfterMarkDeletePosition.put(k.consumerName(), v.toString());
                 });
-            }
-            final String lastSentPosition = ((PersistentStickyKeyDispatcherMultipleConsumers) dispatcher)
-                    .getLastSentPosition();
-            if (lastSentPosition != null) {
-                subStats.lastSentPosition = lastSentPosition;
-            }
-            final String individuallySentPositions = ((PersistentStickyKeyDispatcherMultipleConsumers) dispatcher)
-                    .getIndividuallySentPositions();
-            if (individuallySentPositions != null) {
-                subStats.individuallySentPositions = individuallySentPositions;
             }
         }
         subStats.nonContiguousDeletedMessagesRanges = cursor.getTotalNonContiguousDeletedMessagesRange();
@@ -1331,9 +1326,9 @@ public class PersistentSubscription extends AbstractSubscription {
             return CompletableFuture.completedFuture(subStats);
         }
         if (subStats.msgBacklog > 0) {
-            ManagedLedgerImpl managedLedger = ((ManagedLedgerImpl) cursor.getManagedLedger());
+            ManagedLedger managedLedger = cursor.getManagedLedger();
             Position markDeletedPosition = cursor.getMarkDeletedPosition();
-            return managedLedger.getEarliestMessagePublishTimeOfPos(markDeletedPosition).thenApply(v -> {
+            return getEarliestMessagePublishTimeOfPos(managedLedger, markDeletedPosition).thenApply(v -> {
                 subStats.earliestMsgPublishTimeInBacklog = v;
                 return subStats;
             });
@@ -1341,6 +1336,48 @@ public class PersistentSubscription extends AbstractSubscription {
             subStats.earliestMsgPublishTimeInBacklog = -1;
             return CompletableFuture.completedFuture(subStats);
         }
+    }
+
+    private CompletableFuture<Long> getEarliestMessagePublishTimeOfPos(ManagedLedger ml, Position pos) {
+        CompletableFuture<Long> future = new CompletableFuture<>();
+        if (pos == null) {
+            future.complete(0L);
+            return future;
+        }
+        Position nextPos = ml.getNextValidPosition(pos);
+
+        if (nextPos.compareTo(ml.getLastConfirmedEntry()) > 0) {
+            return CompletableFuture.completedFuture(-1L);
+        }
+
+        ml.asyncReadEntry(nextPos, new ReadEntryCallback() {
+            @Override
+            public void readEntryComplete(Entry entry, Object ctx) {
+                try {
+                    long entryTimestamp = Commands.getEntryTimestamp(entry.getDataBuffer());
+                    future.complete(entryTimestamp);
+                } catch (IOException e) {
+                    log.error("Error deserializing message for message position {}", nextPos, e);
+                    future.completeExceptionally(e);
+                } finally {
+                    entry.release();
+                }
+            }
+
+            @Override
+            public void readEntryFailed(ManagedLedgerException exception, Object ctx) {
+                log.error("Error read entry for position {}", nextPos, exception);
+                future.completeExceptionally(exception);
+            }
+
+            @Override
+            public String toString() {
+                return String.format("ML [%s] get earliest message publish time of pos",
+                        ml.getName());
+            }
+        }, null);
+
+        return future;
     }
 
     @Override

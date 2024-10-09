@@ -54,7 +54,6 @@ import java.util.TreeMap;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -131,7 +130,6 @@ import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.common.util.SafeCollectionUtils;
 import org.apache.pulsar.common.util.collections.BitSetRecyclable;
 import org.apache.pulsar.common.util.collections.ConcurrentBitSetRecyclable;
-import org.apache.pulsar.common.util.collections.ConcurrentOpenHashMap;
 import org.apache.pulsar.common.util.collections.GrowableArrayBlockingQueue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -208,8 +206,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
 
     protected volatile boolean paused;
 
-    protected ConcurrentOpenHashMap<String, ChunkedMessageCtx> chunkedMessagesMap =
-            ConcurrentOpenHashMap.<String, ChunkedMessageCtx>newBuilder().build();
+    protected Map<String, ChunkedMessageCtx> chunkedMessagesMap = new ConcurrentHashMap<>();
     private int pendingChunkedMessageCount = 0;
     protected long expireTimeOfIncompleteChunkedMessageMillis = 0;
     private final AtomicBoolean expireChunkMessageTaskScheduled = new AtomicBoolean(false);
@@ -235,7 +232,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
     private final Counter consumerDlqMessagesCounter;
 
     private final AtomicReference<ClientCnx> clientCnxUsedForConsumerRegistration = new AtomicReference<>();
-    private final List<Throwable> previousExceptions = new CopyOnWriteArrayList<Throwable>();
+    private final AtomicInteger previousExceptionCount = new AtomicInteger();
     private volatile boolean hasSoughtByTimestamp = false;
 
     static <T> ConsumerImpl<T> newConsumerImpl(PulsarClientImpl client,
@@ -825,7 +822,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
 
     @Override
     public CompletableFuture<Void> connectionOpened(final ClientCnx cnx) {
-        previousExceptions.clear();
+        previousExceptionCount.set(0);
         getConnectionHandler().setMaxMessageSize(cnx.getMaxMessageSize());
 
         final State state = getState();
@@ -1069,7 +1066,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         boolean nonRetriableError = !PulsarClientException.isRetriableError(exception);
         boolean timeout = System.currentTimeMillis() > lookupDeadline;
         if (nonRetriableError || timeout) {
-            exception.setPreviousExceptions(previousExceptions);
+            exception.setPreviousExceptionCount(previousExceptionCount);
             if (subscribeFuture.completeExceptionally(exception)) {
                 setState(State.Failed);
                 if (nonRetriableError) {
@@ -1083,7 +1080,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 client.cleanupConsumer(this);
             }
         } else {
-            previousExceptions.add(exception);
+            previousExceptionCount.incrementAndGet();
         }
     }
 
@@ -1302,9 +1299,10 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 increaseAvailablePermits(cnx());
                 return;
             }
+            Message<T> interceptMsg = onArrival(message);
             if (hasNextPendingReceive()) {
-                notifyPendingReceivedCallback(message, null);
-            } else if (enqueueMessageAndCheckBatchReceive(message) && hasPendingBatchReceive()) {
+                notifyPendingReceivedCallback(interceptMsg, null);
+            } else if (enqueueMessageAndCheckBatchReceive(interceptMsg) && hasPendingBatchReceive()) {
                 notifyPendingBatchReceivedCallBack();
             }
         });
@@ -1844,6 +1842,9 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         int available = AVAILABLE_PERMITS_UPDATER.addAndGet(this, delta);
         while (available >= getCurrentReceiverQueueSize() / 2 && !paused) {
             if (AVAILABLE_PERMITS_UPDATER.compareAndSet(this, available, 0)) {
+                if (log.isDebugEnabled()) {
+                    log.debug("[{}] Sending permit-cmd to broker with available permits = {}", topic, available);
+                }
                 sendFlowPermitsToBroker(currentCnx, available);
                 break;
             } else {

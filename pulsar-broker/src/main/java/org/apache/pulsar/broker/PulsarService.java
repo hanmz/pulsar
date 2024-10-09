@@ -37,6 +37,7 @@ import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -123,7 +124,9 @@ import org.apache.pulsar.broker.stats.PulsarBrokerOpenTelemetry;
 import org.apache.pulsar.broker.stats.prometheus.PrometheusMetricsServlet;
 import org.apache.pulsar.broker.stats.prometheus.PrometheusRawMetricsProvider;
 import org.apache.pulsar.broker.stats.prometheus.PulsarPrometheusMetricsServlet;
+import org.apache.pulsar.broker.storage.BookkeeperManagedLedgerStorageClass;
 import org.apache.pulsar.broker.storage.ManagedLedgerStorage;
+import org.apache.pulsar.broker.storage.ManagedLedgerStorageClass;
 import org.apache.pulsar.broker.transaction.buffer.TransactionBufferProvider;
 import org.apache.pulsar.broker.transaction.buffer.impl.TransactionBufferClientImpl;
 import org.apache.pulsar.broker.transaction.pendingack.TransactionPendingAckStoreProvider;
@@ -209,7 +212,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
     private static final int DEFAULT_MONOTONIC_CLOCK_GRANULARITY_MILLIS = 8;
     private final ServiceConfiguration config;
     private NamespaceService nsService = null;
-    private ManagedLedgerStorage managedLedgerClientFactory = null;
+    private ManagedLedgerStorage managedLedgerStorage = null;
     private LeaderElectionService leaderElectionService = null;
     private BrokerService brokerService = null;
     private WebService webService = null;
@@ -220,6 +223,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
     private StrategicTwoPhaseCompactor strategicCompactor;
     private ResourceUsageTransportManager resourceUsageTransportManager;
     private ResourceGroupService resourceGroupServiceManager;
+    private final Clock clock;
 
     private final ScheduledExecutorService executor;
 
@@ -298,6 +302,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
     private final DefaultMonotonicSnapshotClock monotonicSnapshotClock;
     private String brokerId;
     private final CompletableFuture<Void> readyForIncomingRequestsFuture = new CompletableFuture<>();
+    private final List<Runnable> pendingTasksBeforeReadyForIncomingRequests = new ArrayList<>();
 
     public enum State {
         Init, Started, Closing, Closed
@@ -339,6 +344,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         PulsarConfigurationLoader.isComplete(config);
         TransactionBatchedWriteValidator.validate(config);
         this.config = config;
+        this.clock = Clock.systemUTC();
 
         this.openTelemetry = new PulsarBrokerOpenTelemetry(config, openTelemetrySdkBuilderCustomizer);
 
@@ -509,6 +515,9 @@ public class PulsarService implements AutoCloseable, ShutdownService {
                 return closeFuture;
             }
             LOG.info("Closing PulsarService");
+            if (topicPoliciesService != null) {
+                topicPoliciesService.close();
+            }
             if (brokerService != null) {
                 brokerService.unloadNamespaceBundlesGracefully();
             }
@@ -599,13 +608,13 @@ public class PulsarService implements AutoCloseable, ShutdownService {
                 this.brokerService = null;
             }
 
-            if (this.managedLedgerClientFactory != null) {
+            if (this.managedLedgerStorage != null) {
                 try {
-                    this.managedLedgerClientFactory.close();
+                    this.managedLedgerStorage.close();
                 } catch (Exception e) {
                     LOG.warn("ManagedLedgerClientFactory closing failed {}", e.getMessage());
                 }
-                this.managedLedgerClientFactory = null;
+                this.managedLedgerStorage = null;
             }
 
             if (bkClientFactory != null) {
@@ -629,10 +638,6 @@ public class PulsarService implements AutoCloseable, ShutdownService {
                 transactionBufferClient.close();
             }
 
-            if (topicPoliciesService != null) {
-                topicPoliciesService.close();
-                topicPoliciesService = null;
-            }
 
             if (client != null) {
                 client.close();
@@ -896,7 +901,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
             // Now we are ready to start services
             this.bkClientFactory = newBookKeeperClientFactory();
 
-            managedLedgerClientFactory = newManagedLedgerClientFactory();
+            managedLedgerStorage = newManagedLedgerStorage();
 
             this.brokerService = newBrokerService(this);
 
@@ -985,11 +990,8 @@ public class PulsarService implements AutoCloseable, ShutdownService {
             this.nsService.initialize();
 
             // Start topic level policies service
-            if (config.isSystemTopicAndTopicLevelPoliciesEnabled()) {
-                this.topicPoliciesService = new SystemTopicBasedTopicPoliciesService(this);
-            }
-
-            this.topicPoliciesService.start();
+            this.topicPoliciesService = initTopicPoliciesService();
+            this.topicPoliciesService.start(this);
 
             // Register heartbeat and bootstrap namespaces.
             this.nsService.registerBootstrapNamespaces();
@@ -1023,7 +1025,13 @@ public class PulsarService implements AutoCloseable, ShutdownService {
             this.metricsGenerator = new MetricsGenerator(this);
 
             // the broker is ready to accept incoming requests by Pulsar binary protocol and http/https
-            readyForIncomingRequestsFuture.complete(null);
+            final List<Runnable> runnables;
+            synchronized (pendingTasksBeforeReadyForIncomingRequests) {
+                runnables = new ArrayList<>(pendingTasksBeforeReadyForIncomingRequests);
+                pendingTasksBeforeReadyForIncomingRequests.clear();
+                readyForIncomingRequestsFuture.complete(null);
+            }
+            runnables.forEach(Runnable::run);
 
             // Initialize the message protocol handlers.
             // start the protocol handlers only after the broker is ready,
@@ -1073,7 +1081,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
             state = State.Started;
         } catch (Exception e) {
             LOG.error("Failed to start Pulsar service: {}", e.getMessage(), e);
-            PulsarServerException startException = new PulsarServerException(e);
+            PulsarServerException startException = PulsarServerException.from(e);
             readyForIncomingRequestsFuture.completeExceptionally(startException);
             throw startException;
         } finally {
@@ -1082,7 +1090,21 @@ public class PulsarService implements AutoCloseable, ShutdownService {
     }
 
     public void runWhenReadyForIncomingRequests(Runnable runnable) {
-        readyForIncomingRequestsFuture.thenRun(runnable);
+        // Here we don't call the thenRun() methods because CompletableFuture maintains a stack for pending callbacks,
+        // not a queue. Once the future is complete, the pending callbacks will be executed in reverse order of
+        // when they were added.
+        final boolean addedToPendingTasks;
+        synchronized (pendingTasksBeforeReadyForIncomingRequests) {
+            if (readyForIncomingRequestsFuture.isDone()) {
+                addedToPendingTasks = false;
+            } else {
+                pendingTasksBeforeReadyForIncomingRequests.add(runnable);
+                addedToPendingTasks = true;
+            }
+        }
+        if (!addedToPendingTasks) {
+            runnable.run();
+        }
     }
 
     public void waitUntilReadyForIncomingRequests() throws ExecutionException, InterruptedException {
@@ -1102,7 +1124,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
     }
 
     @VisibleForTesting
-    protected ManagedLedgerStorage newManagedLedgerClientFactory() throws Exception {
+    protected ManagedLedgerStorage newManagedLedgerStorage() throws Exception {
         return ManagedLedgerStorage.create(
                 config, localMetadataStore,
                 bkClientFactory, ioEventLoopGroup, openTelemetry.getOpenTelemetryService().getOpenTelemetry()
@@ -1328,7 +1350,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
             long resourceQuotaUpdateInterval = TimeUnit.MINUTES
                     .toMillis(getConfiguration().getLoadBalancerResourceQuotaUpdateIntervalMinutes());
             loadSheddingTask = new LoadSheddingTask(loadManager, loadManagerExecutor,
-                    config, getManagedLedgerFactory());
+                    config, getDefaultManagedLedgerFactory());
             loadSheddingTask.start();
             loadResourceQuotaTask = loadManagerExecutor.scheduleAtFixedRate(
                     new LoadResourceQuotaUpdaterTask(loadManager), resourceQuotaUpdateInterval,
@@ -1515,11 +1537,17 @@ public class PulsarService implements AutoCloseable, ShutdownService {
     }
 
     public BookKeeper getBookKeeperClient() {
-        return getManagedLedgerClientFactory().getBookKeeperClient();
+        ManagedLedgerStorageClass defaultStorageClass = getManagedLedgerStorage().getDefaultStorageClass();
+        if (defaultStorageClass instanceof BookkeeperManagedLedgerStorageClass bkStorageClass) {
+            return bkStorageClass.getBookKeeperClient();
+        } else {
+            // TODO: Refactor code to support other than default bookkeeper based storage class
+            throw new UnsupportedOperationException("BookKeeper client is not available");
+        }
     }
 
-    public ManagedLedgerFactory getManagedLedgerFactory() {
-        return getManagedLedgerClientFactory().getManagedLedgerFactory();
+    public ManagedLedgerFactory getDefaultManagedLedgerFactory() {
+        return getManagedLedgerStorage().getDefaultStorageClass().getManagedLedgerFactory();
     }
 
     /**
@@ -2112,5 +2140,23 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         } finally {
             mutex.unlock();
         }
+    }
+
+    private TopicPoliciesService initTopicPoliciesService() throws Exception {
+        if (!config.isTopicLevelPoliciesEnabled()) {
+            return TopicPoliciesService.DISABLED;
+        }
+        final var className = Optional.ofNullable(config.getTopicPoliciesServiceClassName())
+                .orElse(SystemTopicBasedTopicPoliciesService.class.getName());
+        if (className.equals(SystemTopicBasedTopicPoliciesService.class.getName())) {
+            if (config.isSystemTopicEnabled()) {
+                return new SystemTopicBasedTopicPoliciesService(this);
+            } else {
+                LOG.warn("System topic is disabled while the topic policies service is {}, disable it", className);
+                return TopicPoliciesService.DISABLED;
+            }
+        }
+        return (TopicPoliciesService) Reflections.createInstance(className,
+                Thread.currentThread().getContextClassLoader());
     }
 }
