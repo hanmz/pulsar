@@ -92,6 +92,7 @@ import org.apache.pulsar.broker.service.BrokerService;
 import org.apache.pulsar.broker.service.BrokerServiceException;
 import org.apache.pulsar.broker.service.SystemTopicTxnBufferSnapshotService;
 import org.apache.pulsar.broker.service.SystemTopicTxnBufferSnapshotService.ReferenceCountedWriter;
+import org.apache.pulsar.broker.service.TopicPolicyTestUtils;
 import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.broker.service.TransactionBufferSnapshotServiceFactory;
 import org.apache.pulsar.broker.service.persistent.PersistentSubscription;
@@ -142,10 +143,8 @@ import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.DelayedDeliveryPolicies;
 import org.apache.pulsar.common.policies.data.ManagedLedgerInternalStats;
 import org.apache.pulsar.common.policies.data.RetentionPolicies;
-import org.apache.pulsar.common.policies.data.TopicPolicies;
 import org.apache.pulsar.common.policies.data.stats.TopicStatsImpl;
 import org.apache.pulsar.common.schema.SchemaInfo;
-import org.apache.pulsar.common.util.collections.ConcurrentOpenHashMap;
 import org.apache.pulsar.compaction.CompactionServiceFactory;
 import org.apache.pulsar.compaction.PulsarCompactionServiceFactory;
 import org.apache.pulsar.opentelemetry.OpenTelemetryAttributes;
@@ -385,8 +384,7 @@ public class TransactionTest extends TransactionTestBase {
             return true;
         });
 
-        ConcurrentOpenHashMap<String, CompletableFuture<Optional<Topic>>> topics =
-                getPulsarServiceList().get(0).getBrokerService().getTopics();
+        final var topics = getPulsarServiceList().get(0).getBrokerService().getTopics();
 
         Assert.assertNull(topics.get(TopicName.get(TopicDomain.persistent.value(),
                 NamespaceName.SYSTEM_NAMESPACE, TRANSACTION_LOG_PREFIX).toString() + 0));
@@ -512,7 +510,7 @@ public class TransactionTest extends TransactionTestBase {
         admin.topics().createNonPartitionedTopic(topic);
         PulsarService pulsarService = super.getPulsarServiceList().get(0);
         pulsarService.getBrokerService().getTopics().clear();
-        ManagedLedgerFactory managedLedgerFactory = pulsarService.getBrokerService().getManagedLedgerFactory();
+        ManagedLedgerFactory managedLedgerFactory = pulsarService.getDefaultManagedLedgerFactory();
         Field field = ManagedLedgerFactoryImpl.class.getDeclaredField("ledgers");
         field.setAccessible(true);
         ConcurrentHashMap<String, CompletableFuture<ManagedLedgerImpl>> ledgers =
@@ -550,11 +548,7 @@ public class TransactionTest extends TransactionTestBase {
                     .getSubscription(subName);
             subscription.getPendingAckManageLedger().thenAccept(managedLedger -> {
                 long retentionSize = managedLedger.getConfig().getRetentionSizeInMB();
-                if (!originPersistentTopic.getTopicPolicies().isPresent()) {
-                    log.error("Failed to getTopicPolicies of :" + originPersistentTopic);
-                    Assert.fail();
-                }
-                TopicPolicies topicPolicies = originPersistentTopic.getTopicPolicies().get();
+                TopicPolicyTestUtils.getTopicPolicies(originPersistentTopic); // verify the topic policies exist
                 Assert.assertEquals(retentionSizeInMbSetTopic, retentionSize);
                 MLPendingAckStoreProvider mlPendingAckStoreProvider = new MLPendingAckStoreProvider();
                 CompletableFuture<PendingAckStore> future = mlPendingAckStoreProvider.newPendingAckStore(subscription);
@@ -864,7 +858,8 @@ public class TransactionTest extends TransactionTestBase {
         doReturn(CompletableFuture.completedFuture(
                 new MLPendingAckStore(persistentTopic.getManagedLedger(), managedCursor, null,
                         500, bufferedWriterConfig, transactionTimer,
-                        DISABLED_BUFFERED_WRITER_METRICS)))
+                        DISABLED_BUFFERED_WRITER_METRICS, persistentTopic.getBrokerService().getPulsar()
+                        .getOrderedExecutor().chooseThread())))
                 .when(pendingAckStoreProvider).newPendingAckStore(any());
         doReturn(CompletableFuture.completedFuture(true)).when(pendingAckStoreProvider).checkInitializedBefore(any());
 

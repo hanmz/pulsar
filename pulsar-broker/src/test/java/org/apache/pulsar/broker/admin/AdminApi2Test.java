@@ -87,11 +87,13 @@ import org.apache.pulsar.broker.service.plugin.EntryFilterTest;
 import org.apache.pulsar.broker.service.plugin.EntryFilterWithClassLoader;
 import org.apache.pulsar.broker.testcontext.MockEntryFilterProvider;
 import org.apache.pulsar.broker.testcontext.PulsarTestContext;
+import org.apache.pulsar.client.admin.GrantTopicPermissionOptions;
 import org.apache.pulsar.client.admin.ListNamespaceTopicsOptions;
 import org.apache.pulsar.client.admin.Mode;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.admin.PulsarAdminException.PreconditionFailedException;
+import org.apache.pulsar.client.admin.RevokeTopicPermissionOptions;
 import org.apache.pulsar.client.admin.Topics.QueryParam;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
@@ -114,9 +116,7 @@ import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.*;
 import org.apache.pulsar.common.policies.data.impl.BacklogQuotaImpl;
 import org.apache.pulsar.common.protocol.schema.SchemaData;
-import org.apache.pulsar.common.util.collections.ConcurrentOpenHashMap;
 import org.awaitility.Awaitility;
-import org.awaitility.reflect.WhiteboxImpl;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
@@ -2913,8 +2913,7 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
     }
 
     private AtomicInteger injectSchemaCheckCounterForTopic(String topicName) {
-        ConcurrentOpenHashMap<String, CompletableFuture<Optional<Topic>>> topics =
-                WhiteboxImpl.getInternalState(pulsar.getBrokerService(), "topics");
+        final var topics = pulsar.getBrokerService().getTopics();
         AbstractTopic topic = (AbstractTopic) topics.get(topicName).join().get();
         AbstractTopic spyTopic = Mockito.spy(topic);
         AtomicInteger counter = new AtomicInteger();
@@ -3488,7 +3487,7 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
         parameters1.put("usage_threshold", "100");
         List<String> nsRegexList = new ArrayList<>(namespaces);
 
-        return NamespaceIsolationData.builder()
+        NamespaceIsolationData.Builder build = NamespaceIsolationData.builder()
                 // "prop-ig/ns1" is present in test cluster, policy set on test2 should work
                 .namespaces(nsRegexList)
                 .primary(primaryBrokers)
@@ -3496,9 +3495,11 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
                 .autoFailoverPolicy(AutoFailoverPolicyData.builder()
                         .policyType(AutoFailoverPolicyType.min_available)
                         .parameters(parameters1)
-                        .build())
-                .unloadScope(scope)
-                .build();
+                        .build());
+        if (scope != null) {
+            build.unloadScope(scope);
+        }
+        return build.build();
     }
 
     private boolean allTopicsUnloaded(List<String> topics) {
@@ -3624,18 +3625,42 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
         testIsolationPolicyUnloadsNSWithScope(
                 topicType, "policy-all", nsPrefix, List.of("a1", "a2", "b1", "b2", "c1"),
                 all_matching, List.of(".*-unload-test-a.*"), List.of("b1", "b2", "c1"),
-                all_matching, List.of(".*-unload-test-a.*", ".*-unload-test-c.*"), List.of("b1", "b2"),
+                all_matching, List.of(".*-unload-test-c.*"), List.of("b1", "b2"),
                 Collections.singletonList(".*")
         );
     }
 
     @Test(dataProvider = "topicType")
-    public void testIsolationPolicyUnloadsNSWithChangedScope(final String topicType) throws Exception {
+    public void testIsolationPolicyUnloadsNSWithChangedScope1(final String topicType) throws Exception {
+        String nsPrefix1 = newUniqueName(defaultTenant + "/") + "-unload-test-";
+        // Addition case
+        testIsolationPolicyUnloadsNSWithScope(
+                topicType, "policy-changed1", nsPrefix1, List.of("a1", "a2", "b1", "b2", "c1"),
+                all_matching, List.of(".*-unload-test-a.*"), List.of("b1", "b2", "c1"),
+                changed, List.of(".*-unload-test-a.*", ".*-unload-test-c.*"), List.of("a1", "a2", "b1", "b2"),
+                Collections.singletonList(".*")
+        );
+    }
+
+    @Test(dataProvider = "topicType")
+    public void testIsolationPolicyUnloadsNSWithChangedScope2(final String topicType) throws Exception {
+        String nsPrefix2 = newUniqueName(defaultTenant + "/") + "-unload-test-";
+        // removal case
+        testIsolationPolicyUnloadsNSWithScope(
+                topicType, "policy-changed2", nsPrefix2, List.of("a1", "a2", "b1", "b2", "c1"),
+                all_matching, List.of(".*-unload-test-a.*", ".*-unload-test-c.*"), List.of("b1", "b2"),
+                changed, List.of(".*-unload-test-c.*"), List.of("b1", "b2", "c1"),
+                Collections.singletonList(".*")
+        );
+    }
+
+    @Test(dataProvider = "topicType")
+    public void testIsolationPolicyUnloadsNSWithScopeMissing(final String topicType) throws Exception {
         String nsPrefix = newUniqueName(defaultTenant + "/") + "-unload-test-";
         testIsolationPolicyUnloadsNSWithScope(
                 topicType, "policy-changed", nsPrefix, List.of("a1", "a2", "b1", "b2", "c1"),
                 all_matching, List.of(".*-unload-test-a.*"), List.of("b1", "b2", "c1"),
-                changed, List.of(".*-unload-test-a.*", ".*-unload-test-c.*"), List.of("a1", "a2", "b1", "b2"),
+                null, List.of(".*-unload-test-a.*", ".*-unload-test-c.*"), List.of("a1", "a2", "b1", "b2"),
                 Collections.singletonList(".*")
         );
     }
@@ -3661,5 +3686,62 @@ public class AdminApi2Test extends MockedPulsarServiceBaseTest {
                 changed, List.of(".*-unload-test-a.*", ".*-unload-test-c.*"), List.of("b1", "b2"),
                 List.of(".*", "broker.*")
         );
+    }
+
+    @Test
+    public void testGrantAndRevokePermissions() throws Exception {
+
+        String namespace = newUniqueName(defaultTenant + "/") + "-unload-test-";
+        String namespace2 = newUniqueName(defaultTenant + "/") + "-unload-test-";
+        admin.namespaces().createNamespace(namespace, Set.of("test"));
+        admin.namespaces().createNamespace(namespace2, Set.of("test"));
+        //
+        final String topic1 = "persistent://" + namespace + "/test1";
+        final String topic2 = "persistent://" + namespace + "/test2";
+        final String topic3 = "non-persistent://" + namespace + "/test3";
+        final String topic4 = "persistent://" + namespace2 + "/test4";;
+
+        admin.topics().createPartitionedTopic(topic1, 3);
+        admin.topics().createPartitionedTopic(topic2, 3);
+        admin.topics().createPartitionedTopic(topic3, 3);
+        admin.topics().createPartitionedTopic(topic4, 3);
+        pulsarClient.newProducer().topic(topic1).create().close();
+        pulsarClient.newProducer().topic(topic2).create().close();
+        pulsarClient.newProducer().topic(topic3).create().close();
+        pulsarClient.newProducer().topic(topic4).create().close();
+
+        List<GrantTopicPermissionOptions> grantPermissionOptions = new ArrayList<>();
+        grantPermissionOptions.add(GrantTopicPermissionOptions.builder().topic(topic1).role("role1").actions(Set.of(AuthAction.produce)).build());
+        grantPermissionOptions.add(GrantTopicPermissionOptions.builder().topic(topic4).role("role4").actions(Set.of(AuthAction.produce)).build());
+        try {
+            admin.namespaces().grantPermissionOnTopics(grantPermissionOptions);
+            fail("Should go here, because there are two namespaces");
+        } catch (Exception ex) {
+            Assert.assertTrue(ex != null);
+        }
+        grantPermissionOptions.clear();
+        grantPermissionOptions.add(GrantTopicPermissionOptions.builder().topic(topic1).role("role1").actions(Set.of(AuthAction.produce)).build());
+        grantPermissionOptions.add(GrantTopicPermissionOptions.builder().topic(topic2).role("role2").actions(Set.of(AuthAction.consume)).build());
+        grantPermissionOptions.add(GrantTopicPermissionOptions.builder().topic(topic3).role("role3").actions(Set.of(AuthAction.produce, AuthAction.consume)).build());
+        admin.namespaces().grantPermissionOnTopics(grantPermissionOptions);
+
+        final Map<String, Set<AuthAction>> permissions1 = admin.topics().getPermissions(topic1);
+        final Map<String, Set<AuthAction>> permissions2 = admin.topics().getPermissions(topic2);
+        final Map<String, Set<AuthAction>> permissions3 = admin.topics().getPermissions(topic3);
+
+        Assert.assertEquals(permissions1.get("role1"), Set.of(AuthAction.produce));
+        Assert.assertEquals(permissions2.get("role2"), Set.of(AuthAction.consume));
+        Assert.assertEquals(permissions3.get("role3"), Set.of(AuthAction.produce, AuthAction.consume));
+        //
+        List<RevokeTopicPermissionOptions> revokePermissionOptions = new ArrayList<>();
+        revokePermissionOptions.add(RevokeTopicPermissionOptions.builder().topic(topic1).role("role1").build());
+        revokePermissionOptions.add(RevokeTopicPermissionOptions.builder().topic(topic2).role("role2").build());
+        admin.namespaces().revokePermissionOnTopics(revokePermissionOptions);
+
+        final Map<String, Set<AuthAction>> permissions11 = admin.topics().getPermissions(topic1);
+        final Map<String, Set<AuthAction>> permissions22 = admin.topics().getPermissions(topic2);
+
+        Assert.assertTrue(permissions11.isEmpty());
+        Assert.assertTrue(permissions22.isEmpty());
     }
 }
